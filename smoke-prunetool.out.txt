@@ -1,0 +1,12 @@
+
+------------------------------------------------------------
+  ERROR: Port 8080 is already in use.
+     Likely cause : a local dev server or HTTP proxy (common default)
+     PruneTool needs port 8080 for the Proxy (IDE endpoint).
+
+  Fix options:
+    1. Stop whatever is running on port 8080 and retry.
+    2. Set a different port in ~/.prunetool/.env:
+         PRUNE_PROXY_PORT=8081
+------------------------------------------------------------
+

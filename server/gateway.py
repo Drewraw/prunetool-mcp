@@ -71,6 +71,57 @@ DEFAULT_SYSTEM_INSTRUCTIONS = """You are an expert software engineer.
 Analyze the provided codebase context to answer the user's question.
 Focus on accuracy and cite specific file paths and line numbers."""
 
+_ENV_SKIP_DIRS = {
+    ".git", ".venv", "node_modules", "dist", "build", "cache", "__pycache__",
+    ".next", ".dart_tool", ".firebase",
+}
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return env
+
+
+def _find_env_file(search_root: Path | None = None) -> Path | None:
+    env_hint = os.environ.get("PRUNE_ENV_FILE", "").strip()
+    if env_hint:
+        hinted = Path(env_hint)
+        if hinted.exists():
+            return hinted
+
+    root = search_root or Path(CODEBASE_ROOT)
+    if root.is_file():
+        root = root.parent
+
+    direct = root / ".env"
+    if direct.exists():
+        return direct
+
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _ENV_SKIP_DIRS]
+        if ".env" in filenames:
+            candidate = Path(dirpath) / ".env"
+            if candidate != direct:
+                candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        if _parse_env_file(candidate).get("PRUNE_CODEBASE_ROOT"):
+            return candidate
+
+    return min(candidates, key=lambda p: len(p.relative_to(root).parts))
+
 # -------------------------------------------------------------------
 # Global State
 # -------------------------------------------------------------------
@@ -143,6 +194,15 @@ async def lifespan(app: FastAPI):
 
     print(f"[gateway] Codebase root: {CODEBASE_ROOT}")
     print(f"[gateway] Index path: {INDEX_PATH}")
+    
+    # Validate CODEBASE_ROOT exists and is accessible
+    croot_path = Path(CODEBASE_ROOT)
+    if not croot_path.exists():
+        print(f"[gateway] ERROR: CODEBASE_ROOT does not exist: {CODEBASE_ROOT}")
+        raise ValueError(f"PRUNE_CODEBASE_ROOT path not found: {CODEBASE_ROOT}")
+    if not croot_path.is_dir():
+        print(f"[gateway] ERROR: CODEBASE_ROOT is not a directory: {CODEBASE_ROOT}")
+        raise ValueError(f"PRUNE_CODEBASE_ROOT is not a directory: {CODEBASE_ROOT}")
 
     # Initialize Storage Manager (single source of truth)
     storage = StorageManager(CODEBASE_ROOT)
@@ -1398,13 +1458,12 @@ class ApiKeySetup(BaseModel):
 @app.post("/api/setup")
 async def setup_endpoint(body: ApiKeySetup):
     """
-    Save API keys and project root to ~/.prunetool/.env
+    Save API keys and project root to the discovered project .env file.
     Called from the dashboard setup screen on first run.
-    Keys never touch the binary — stored only in the user's home dir.
+    Keys never touch the binary — stored in the project tree.
     """
-    env_dir  = Path.home() / ".prunetool"
-    env_file = env_dir / ".env"
-    env_dir.mkdir(parents=True, exist_ok=True)
+    env_file = _find_env_file(Path(CODEBASE_ROOT)) or (Path(CODEBASE_ROOT) / ".env")
+    env_file.parent.mkdir(parents=True, exist_ok=True)
 
     lines = []
     if body.anthropic_api_key.strip():
@@ -1479,8 +1538,8 @@ async def setup_endpoint(body: ApiKeySetup):
 @app.get("/api/setup/status")
 async def setup_status_endpoint():
     """Check which keys are configured — returns key names only, never values."""
-    env_file = Path.home() / ".prunetool" / ".env"
-    if not env_file.exists():
+    env_file = _find_env_file(Path(CODEBASE_ROOT))
+    if env_file is None or not env_file.exists():
         return {"configured": False, "keys": []}
     keys = []
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -1858,6 +1917,8 @@ def _parse_llm_finder_gateway(path: str) -> list:
     import re as _re
     try:
         text = open(path, encoding="utf-8").read()
+        if _re.search(r"(?m)^\s*provider:\s*", text):
+            text = _re.sub(r"(?m)^(\s*)provider:\s*", r"\1// provider: ", text, count=1)
         text = _re.sub(r'(?<!:)(?<!\\)//[^\n]*', "", text)
         text = _re.sub(r"/\*.*?\*/", "", text, flags=_re.DOTALL)
         text = _re.sub(r"^\s*module\.exports\s*=\s*", "", text.strip())

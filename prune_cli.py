@@ -1,5 +1,5 @@
-"""
-prune_cli.py — PruneTool interactive CLI
+﻿"""
+prune_cli.py â€” PruneTool interactive CLI
 =========================================
 Usage:
   prune chat               Start interactive chat (auto-routes models)
@@ -22,7 +22,9 @@ import sys
 import time
 import datetime
 import hashlib
+import socket
 import shutil as _shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -33,32 +35,123 @@ except ImportError:
     print("ERROR: httpx not installed. Run: pip install httpx")
     sys.exit(1)
 
-# ── Paths ──────────────────────────────────────────────────────────────
-PRUNETOOL_DIR   = Path.home() / ".prunetool"
-ENV_FILE        = PRUNETOOL_DIR / ".env"
-STATS_FILE      = PRUNETOOL_DIR / "daily_stats.json"
-ACTIVE_MODEL_FILE = PRUNETOOL_DIR / "active_model.txt"
-
-# Config search order: user home dir first, then binary dir, then cwd
+# â”€â”€ Paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _HERE = Path(__file__).resolve().parent
-LLM_CONFIG_PATHS = [
-    PRUNETOOL_DIR / "llms_prunetoolfinder.js",   # user's own copy (~/.prunetool/)
-    _HERE / "llms_prunetoolfinder.js",            # shipped default (next to binary)
-]
+_ENV_SKIP_DIRS = {
+    ".git", ".venv", "node_modules", "dist", "build", "cache", "__pycache__",
+    ".next", ".dart_tool", ".firebase",
+}
+
+
+def _project_prunetool_dir() -> Path:
+    root = _project_root_from_env()
+    return (root if root is not None else Path.cwd()) / ".prunetool"
+
+
+def _runtime_prunetool_dir() -> Path:
+    root = _project_root_from_env()
+    return (root if root is not None else Path.cwd()) / ".prunetool"
+
+
+def _runtime_file(name: str) -> Path:
+    return _runtime_prunetool_dir() / name
+
+
+def _project_root_from_env(env: dict | None = None) -> Path | None:
+    source = env or os.environ
+    raw_root = (source.get("PRUNE_CODEBASE_ROOT") or "").strip()
+    if not raw_root:
+        return None
+    return Path(raw_root).expanduser()
+
+
+def _project_llm_config_path(env: dict | None = None) -> Path | None:
+    root = _project_root_from_env(env)
+    if root is None:
+        return None
+    return root / ".prunetool" / "llms_prunetoolfinder.js"
+
+
+def _llm_config_paths(env: dict | None = None) -> list[Path]:
+    # Prefer the target project's config, then the shipped default next to the binary.
+    paths: list[Path] = []
+    project_path = _project_llm_config_path(env)
+    if project_path is not None:
+        paths.append(project_path)
+    paths.append(_HERE / "llms_prunetoolfinder.js")
+    return paths
+
+
+def _parse_env_file(path: Path) -> dict:
+    env: dict = {}
+    try:
+        # Use utf-8-sig to automatically strip BOM if present
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip()
+                if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                    v = v[1:-1]
+                env[k] = v
+    except Exception as e:
+        print(f"[prune] WARNING: Could not read {path}: {e}", file=sys.stderr)
+    return env
+
+
+def _find_env_file(search_root: Path | None = None) -> Path | None:
+    env_hint = os.environ.get("PRUNE_ENV_FILE", "").strip()
+    if env_hint:
+        hinted = Path(env_hint)
+        if hinted.exists():
+            return hinted
+
+    root = search_root or Path.cwd()
+    if root.is_file():
+        root = root.parent
+
+    direct = root / ".env"
+    if direct.exists():
+        return direct
+
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _ENV_SKIP_DIRS]
+        if ".env" in filenames:
+            candidate = Path(dirpath) / ".env"
+            if candidate != direct:
+                candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        data = _parse_env_file(candidate)
+        if data.get("PRUNE_CODEBASE_ROOT"):
+            return candidate
+
+    return min(candidates, key=lambda p: len(p.relative_to(root).parts))
 
 GATEWAY_URL = "http://localhost:8000"
 GATEWAY_TIMEOUT = 5.0
 
 
-# ── Env loader ────────────────────────────────────────────────────────
+# â”€â”€ Env loader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _load_env() -> dict:
-    env: dict = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip()
+    """
+    Load .env from the project directory (current working directory).
+    This is where prune.exe chat is being run from.
+    NO fallback to a separate home-directory .env â€” project config only.
+    """
+    env_file = _find_env_file()
+    if not env_file:
+        return {}
+    os.environ.setdefault("PRUNE_ENV_FILE", str(env_file))
+    env = _parse_env_file(env_file)
+    # Apply parsed env values to os.environ so they're available globally
+    for k, v in env.items():
+        os.environ.setdefault(k, v)
     return env
 
 
@@ -75,7 +168,7 @@ def _get_key(provider: str, env: dict) -> Optional[str]:
     return env.get(env_key) or os.environ.get(env_key)
 
 
-# ── LLM Config loader ─────────────────────────────────────────────────
+# â”€â”€ LLM Config loader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 import re as _re
 
 def _infer_provider(model_id: str) -> str:
@@ -102,10 +195,12 @@ def _parse_js_config(text: str) -> dict:
     obj = m.group(1).strip().rstrip(";")
     # Remove trailing commas before } or ]
     obj = _re.sub(r",\s*([}\]])", r"\1", obj)
+    # Quote bare object keys so JSON can parse the JS object literal.
+    obj = _re.sub(r'(?<=[{,])\s*(\w+)\s*:', lambda m: f' "{m.group(1)}":', obj)
     return json.loads(obj)
 
 
-# Known context windows — users never need to set these manually.
+# Known context windows â€” users never need to set these manually.
 # Keyed by model ID prefix (longest match wins).
 _MODEL_MAX_CONTEXT: list[tuple[str, int]] = [
     ("claude",          200_000),
@@ -131,16 +226,16 @@ def _lookup_max_context(model_id: str) -> int:
     return 128_000  # safe default
 
 
-# ── Live context window cache ──────────────────────────────────────────
-_CTX_CACHE_FILE = PRUNETOOL_DIR / "model_contexts.json"
+# â”€â”€ Live context window cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _CTX_CACHE_TTL  = 86_400  # 24 hours
 
 
 def _load_context_cache() -> dict:
-    if not _CTX_CACHE_FILE.exists():
+    cache_file = _runtime_file("model_contexts.json")
+    if not cache_file.exists():
         return {}
     try:
-        data = json.loads(_CTX_CACHE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
         if time.time() - data.get("_fetched_at", 0) > _CTX_CACHE_TTL:
             return {}
         return data
@@ -149,9 +244,10 @@ def _load_context_cache() -> dict:
 
 
 def _save_context_cache(ctx_map: dict):
-    PRUNETOOL_DIR.mkdir(parents=True, exist_ok=True)
+    runtime_dir = _runtime_prunetool_dir()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
     ctx_map["_fetched_at"] = time.time()
-    _CTX_CACHE_FILE.write_text(json.dumps(ctx_map, indent=2), encoding="utf-8")
+    _runtime_file("model_contexts.json").write_text(json.dumps(ctx_map, indent=2), encoding="utf-8")
 
 
 def _fetch_provider_contexts(env: dict) -> dict:
@@ -162,7 +258,7 @@ def _fetch_provider_contexts(env: dict) -> dict:
     """
     results: dict = {}
 
-    # OpenAI + Groq + Gemini — all speak OpenAI-compatible /v1/models
+    # OpenAI + Groq + Gemini â€” all speak OpenAI-compatible /v1/models
     openai_like = [
         ("openai", "https://api.openai.com/v1/models",   "OPENAI_API_KEY",  "context_window"),
         ("groq",   "https://api.groq.com/openai/v1/models", "GROQ_API_KEY", "context_window"),
@@ -180,7 +276,7 @@ def _fetch_provider_contexts(env: dict) -> dict:
         except Exception:
             pass
 
-    # Anthropic — /v1/models returns context_window per model
+    # Anthropic â€” /v1/models returns context_window per model
     anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if anthropic_key:
         try:
@@ -196,7 +292,7 @@ def _fetch_provider_contexts(env: dict) -> dict:
         except Exception:
             pass
 
-    # Gemini — /v1beta/models uses inputTokenLimit
+    # Gemini â€” /v1beta/models uses inputTokenLimit
     gemini_key = env.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if gemini_key:
         try:
@@ -284,7 +380,7 @@ _PROVIDER_MODELS_FALLBACK = {
     ],
 }
 
-# Known aggregator endpoints — any OpenAI-compatible provider
+# Known aggregator endpoints â€” any OpenAI-compatible provider
 _AGGREGATOR_ENDPOINTS = {
     "groq":       ("https://api.groq.com/openai/v1/models",    "GROQ_API_KEY"),
     "openai":     ("https://api.openai.com/v1/models",          "OPENAI_API_KEY"),
@@ -295,7 +391,7 @@ _AGGREGATOR_ENDPOINTS = {
 
 
 def _guess_complexity(model_id: str) -> str:
-    """Guess complexity tier from model name — size hints in model ID."""
+    """Guess complexity tier from model name â€” size hints in model ID."""
     mid = model_id.lower()
     if any(x in mid for x in ["opus", "o1", "o3", "72b", "70b", "671b", "405b", "large", "pro", "ultra", "max"]):
         return "complex"
@@ -304,12 +400,22 @@ def _guess_complexity(model_id: str) -> str:
     return "simple"
 
 
+def _complexity_legend_lines() -> list[str]:
+    return [
+        "// Complexity legend:",
+        "//   simple = typo fix, rename, add one line, small bug, one-file tweak",
+        "//   medium = new function, small feature, explain one file",
+        "//   heavy  = architecture, refactor multiple files, explain the whole system",
+        "// Edit the complexity value on each model to control which prompts it handles.",
+    ]
+
+
 def _fetch_live_models(provider: str, env: dict) -> list[dict]:
     """
     Fetch live model list from provider or aggregator.
     Returns list of {model, label} dicts.
     """
-    # Anthropic — separate endpoint
+    # Anthropic â€” separate endpoint
     if provider == "anthropic":
         api_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         cli = _shutil.which("claude")
@@ -386,105 +492,118 @@ def _detect_available_providers(env: dict) -> list[str]:
     return available
 
 
-def _generate_llm_config(env: dict):
+def _generate_llm_config(env: dict, selected_providers: list[str] | None = None) -> dict:
     """
-    First-time setup: detect available providers, ask user to pick one or many,
-    auto-generate ~/.prunetool/llms_prunetoolfinder.js with correct models.
+    First-time setup: detect available providers and auto-generate the
+    project-local .prunetool/llms_prunetoolfinder.js with correct models.
     """
-    available = _detect_available_providers(env)
+    config_path = _project_llm_config_path(env)
+    if config_path is None:
+        print("[prune] ERROR: PRUNE_CODEBASE_ROOT is not set in .env.")
+        env_file = _find_env_file()
+        target_env = env_file if env_file else (Path.cwd() / ".env")
+        print(f"  Add it to {target_env} so PruneTool knows which project folder to use.")
+        print("  Example: PRUNE_CODEBASE_ROOT=C:\\path\\to\\your\\project")
+        return _default_config()
 
-    print("\n  [prune] No model config found — let's set it up.")
-    print("  " + "=" * 40)
-
+    available = selected_providers or _detect_available_providers(env)
     if not available:
-        print("  No providers detected. Add API keys to ~/.prunetool/.env")
-        print("  e.g. ANTHROPIC_API_KEY=sk-ant-...")
-        return
+        # No provider access detected. Still generate a usable config from the
+        # built-in fallback model table so the project has a local config file.
+        available = ["groq", "anthropic", "gemini", "openai"]
 
     key_map = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
                "gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
 
+    print("\n  [prune] No local model config found â€” auto-building one now.")
+    print("  " + "=" * 40)
     print("  Detected providers:")
-    for i, p in enumerate(available, 1):
+    for p in available:
         via = "CLI" if _shutil.which("claude" if p == "anthropic" else p) else "API key"
-        print(f"    {i}. {p}  (via {via})")
-
-    print()
-    print("  You can pick one or multiple providers (e.g. '1' or '1,3' or 'anthropic,openai')")
-    choice = input("  Pick providers: ").strip().lower()
-
-    # Parse single or multiple selections
-    selected_providers = []
-    parts = [c.strip() for c in choice.replace(" ", ",").split(",") if c.strip()]
-    for part in parts:
-        if part.isdigit():
-            idx = int(part) - 1
-            if 0 <= idx < len(available):
-                selected_providers.append(available[idx])
-        else:
-            for p in available:
-                if part in p or p in part:
-                    if p not in selected_providers:
-                        selected_providers.append(p)
-
-    if not selected_providers:
-        selected_providers = [available[0]]
-        print(f"  Defaulting to: {selected_providers[0]}")
+        if not _shutil.which("claude" if p == "anthropic" else p) and not env.get(key_map.get(p, "")):
+            via = "fallback"
+        print(f"    - {p}  (via {via})")
 
     # Collect curated models from all selected providers
     final_models = []
     access_lines = []
 
-    for provider in selected_providers:
+    for provider in available:
         cli_name = "claude" if provider == "anthropic" else provider
         has_cli  = bool(_shutil.which(cli_name))
         has_api  = bool(env.get(key_map.get(provider, "")))
-        cli_status = "✓ detected" if has_cli else "not detected"
-        api_status = "✓ detected" if has_api else f"not set (add {key_map.get(provider, 'API_KEY')} to ~/.prunetool/.env)"
+        cli_status = "âœ“ detected" if has_cli else "not detected"
+        env_file = _find_env_file()
+        env_label = env_file if env_file else (Path.cwd() / ".env")
+        api_status = "âœ“ detected" if has_api else f"not set (add {key_map.get(provider, 'API_KEY')} to {env_label})"
         access_lines.append(f'//   {provider}:')
-        access_lines.append(f'//     CLI → {cli_name} CLI {cli_status}')
-        access_lines.append(f'//     API → {key_map.get(provider, "API_KEY")} {api_status}')
+        access_lines.append(f'//     CLI â†’ {cli_name} CLI {cli_status}')
+        access_lines.append(f'//     API â†’ {key_map.get(provider, "API_KEY")} {api_status}')
 
         for m in _PROVIDER_MODELS_FALLBACK.get(provider, []):
             alias      = m["model"].split("/")[-1].replace(":", "-").replace(".", "-")
             complexity = _guess_complexity(m["model"])
             final_models.append({
-                "id": alias, "label": m["label"], "model": m["model"],
-                "complexity": complexity, "dailyTokenGoal": 50000
+                "id": alias,
+                "label": m["label"],
+                "provider": provider,
+                "model": m["model"],
+                "complexity": complexity,
+                "dailyTokenGoal": 50000,
             })
 
     if not final_models:
-        print("  No models found. Edit ~/.prunetool/llms_prunetoolfinder.js manually.")
+        print(f"  No models found. Edit {config_path} manually.")
         return
 
-    provider_str = ", ".join(selected_providers)
+    provider_str = ",".join(available)
+    grouped_models: dict[str, list[dict]] = {}
+    for model in final_models:
+        grouped_models.setdefault(model["provider"], []).append(model)
 
     # Write the config file
     lines = [
-        f'// provider: {provider_str}   ← your preferred providers (anthropic | openai | gemini | groq)',
+        f'// provider: {provider_str}   <- edit this first line to choose providers',
+        f'// If you change providers later, update this line and run prune chat again.',
         f'//',
         f'// Access methods:',
         *access_lines,
         f'//',
         f'// PruneTool uses CLI first, API key as fallback.',
         f'// To switch providers: update the provider line above and re-run prune chat.',
-        "module.exports = {", "  models: ["
+        *_complexity_legend_lines(),
+        "module.exports = {",
+        "  models: [",
     ]
-    for m in final_models:
-        lines.append(
-            f'    {{ id: "{m["id"]}", label: "{m["label"]}", model: "{m["model"]}", '
-            f'complexity: "{m["complexity"]}", dailyTokenGoal: {m["dailyTokenGoal"]} }},'
-        )
+    for provider in available:
+        provider_models = grouped_models.get(provider, [])
+        if not provider_models:
+            continue
+        lines.append(f"    // {provider}")
+        for m in provider_models:
+            lines.extend([
+                "    {",
+                f'      id: "{m["id"]}",',
+                f'      label: "{m["label"]}",',
+                f'      provider: "{m["provider"]}",',
+                f'      model: "{m["model"]}",',
+                f'      complexity: "{m["complexity"]}",',
+                f'      dailyTokenGoal: {m["dailyTokenGoal"]},',
+                "    },",
+            ])
+        lines.append("")
     lines += ["  ]", "};", ""]
 
-    PRUNETOOL_DIR.mkdir(parents=True, exist_ok=True)
-    config_path = PRUNETOOL_DIR / "llms_prunetoolfinder.js"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"\n  [prune] Config saved to {config_path}")
     print(f"  Models configured: {', '.join(m['id'] for m in final_models)}")
     print(f"  Daily token limit: 50,000 per model (edit the file to change)")
     print()
+    generated = _default_config()
+    generated["models"] = final_models
+    return _normalize_js_models(generated)
 
 
 def _load_llm_config(env: dict | None = None) -> dict:
@@ -496,49 +615,81 @@ def _load_llm_config(env: dict | None = None) -> dict:
             _save_context_cache(live)
             print(f"[prune] Fetched live context windows for {len(live)} models.")
 
-    user_config = PRUNETOOL_DIR / "llms_prunetoolfinder.js"
-    if not user_config.exists() and env is not None:
-        _generate_llm_config(env)
+    config_path = _project_llm_config_path(env)
+    if env is not None:
+        if config_path is None:
+            env_file = _find_env_file()
+            env_label = env_file if env_file else (Path.cwd() / ".env")
+            print("[prune] ERROR: PRUNE_CODEBASE_ROOT is missing from .env.")
+            print(f"  Set it to your project folder path in {env_label}")
+            print("  Example: PRUNE_CODEBASE_ROOT=C:\\path\\to\\your\\project")
+            return _default_config()
+        if not config_path.exists() or not config_path.read_text(encoding="utf-8").strip():
+            return _generate_llm_config(env)
 
-    for path in LLM_CONFIG_PATHS:
+    for path in _llm_config_paths(env):
         if not path.exists():
             continue
         try:
             text = path.read_text(encoding="utf-8")
             if path.suffix == ".js":
+                if path == config_path and "// Complexity legend:" not in text:
+                    text = "\n".join(_complexity_legend_lines()) + "\n" + text.lstrip()
+                    path.write_text(text, encoding="utf-8")
+                if path == config_path and _re.search(r"(?m)^\s*provider:\s*", text):
+                    text = _re.sub(r"(?m)^\s*provider:\s*.*(?:\r?\n|$)", "", text, count=1)
                 return _normalize_js_models(_parse_js_config(text), live)
             return json.loads(text)
         except Exception:
             pass
-    print("[prune] WARNING: llms_prunetoolfinder.js not found. Using defaults.")
+    print("[prune] WARNING: No usable llms_prunetoolfinder.js found. Using defaults.")
     return _default_config()
 
 
-def _read_config_provider() -> Optional[str]:
-    """Read the '// provider: <name>' comment from llms_prunetoolfinder.js."""
-    config_path = PRUNETOOL_DIR / "llms_prunetoolfinder.js"
+def _read_config_providers(env: dict | None = None) -> list[str]:
+    """Read the '// provider: <name[,name...]>' comment from llms_prunetoolfinder.js."""
+    config_path = _project_llm_config_path(env or os.environ)
     if not config_path.exists():
-        return None
+        return []
     for line in config_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line.startswith("// provider:"):
-            # extract first word after "// provider:"
-            rest = line.split("// provider:", 1)[1].strip()
-            provider = rest.split()[0].rstrip(",").lower()
-            return provider
-    return None
+        if line.startswith("// provider:") or line.startswith("provider:"):
+            rest = line.split("provider:", 1)[1].strip()
+            provider_text = rest.split("<-", 1)[0].strip()
+            provider_text = provider_text.split("(", 1)[0].strip()
+            provider_text = provider_text.rstrip(",")
+            return [item.strip().lower() for item in provider_text.split(",") if item.strip()]
+    return []
 
 
 def _ping_provider(provider: str, env: dict) -> tuple[bool, str]:
     """
-    Check if the provider is reachable — CLI or API key.
+    Check if the provider is reachable â€” CLI or API key.
     Returns (ok, message).
     """
     cli_name = "claude" if provider == "anthropic" else provider
     key_map  = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
                 "gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
 
-    # Try CLI first
+    # Try CLI auth first for subscription-backed providers.
+    auth_checks = {
+        "anthropic": ("claude", ["auth", "status"]),
+        "openai": ("codex", ["auth", "status"]),
+    }
+    auth_cli, auth_args = auth_checks.get(provider, (None, None))
+    if auth_cli and _shutil.which(auth_cli):
+        try:
+            result = subprocess.run([auth_cli, *auth_args], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return True, f"{auth_cli} auth status OK"
+            output = (result.stdout or result.stderr or "").strip().splitlines()
+            if output:
+                return False, f"{auth_cli} auth status failed: {output[0][:160]}"
+            return False, f"{auth_cli} auth status failed"
+        except Exception:
+            pass
+
+    # Fall back to CLI presence/version.
     if _shutil.which(cli_name):
         try:
             result = subprocess.run([cli_name, "--version"], capture_output=True, text=True, timeout=5)
@@ -564,43 +715,72 @@ def _ping_provider(provider: str, env: dict) -> tuple[bool, str]:
                     return True, f"{provider} API key valid"
         except Exception:
             pass
-        return False, f"{provider} API key set but could not reach {provider} API — check your connection or key"
+        return False, f"{provider} API key set but could not reach {provider} API â€” check your connection or key"
 
-    return False, f"{provider} not reachable — no CLI found and no API key set in ~/.prunetool/.env"
+    env_file = _find_env_file()
+    env_label = env_file if env_file else (Path.cwd() / ".env")
+    return False, f"{provider} not reachable â€” no CLI found and no API key set in {env_label}"
 
 
 def _check_provider_or_ask(env: dict) -> bool:
     """
-    Verify the configured provider is reachable.
-    If not set or unreachable, ask user to fix it.
+    Verify the configured providers in llms_prunetoolfinder.js are reachable.
+    The providers must be listed in the first-line comment:
+      // provider: anthropic,groq
     Returns True if OK to proceed.
     """
+    providers = _read_config_providers(env)
+    if not providers:
+        env_file = _find_env_file()
+        env_label = env_file if env_file else (Path.cwd() / ".env")
+        print("\n  [prune] No providers listed in llms_prunetoolfinder.js.")
+        print("  Add a first-line provider comment, then run prune chat again:")
+        print("    // provider: anthropic,groq")
+        print(f"  The project .env is read from: {env_label}")
+        return False
+
+    print(f"\n  [prune] Using providers from llms_prunetoolfinder.js: {', '.join(providers)}")
+    print(f"\n  [prune] Checking providers: {', '.join(providers)}...", end=" ", flush=True)
+    failures: list[str] = []
+    for provider in providers:
+        ok, msg = _ping_provider(provider, env)
+        if ok:
+            print(f"OK ({provider}: {msg})")
+            return True
+        failures.append(f"{provider}: {msg}")
+
+    print("FAILED")
+    for msg in failures:
+        print(f"  [prune] {msg}")
+    env_file = _find_env_file()
+    env_label = env_file if env_file else (Path.cwd() / ".env")
+    print(f"  Fix: install one of the configured providers or add keys to {env_label}")
+    return False
+
     provider = _read_config_provider()
 
     if not provider:
-        print("\n  [prune] No preferred provider set in llms_prunetoolfinder.js.")
+        print("\n  [prune] No preferred provider set in the project llms_prunetoolfinder.js.")
         print("  Auto mode needs a provider to route queries.")
         available = _detect_available_providers(env)
         if not available:
-            print("  No providers detected. Add an API key to ~/.prunetool/.env")
+            env_file = _find_env_file()
+            env_label = env_file if env_file else (Path.cwd() / ".env")
+            print(f"  No providers detected. Add PRUNE_CODEBASE_ROOT to {env_label} and set your API keys there.")
             print("  e.g. ANTHROPIC_API_KEY=sk-ant-...")
             return False
-        print(f"  Detected: {', '.join(available)}")
-        choice = input("  Pick provider to use (or press Enter to skip): ").strip().lower()
-        if not choice:
-            return False
-        for p in available:
-            if choice in p or p in choice:
-                provider = p
-                break
-        if not provider:
-            provider = available[0]
+        provider = available[0]
         # Update the config file with chosen provider
-        config_path = PRUNETOOL_DIR / "llms_prunetoolfinder.js"
+        config_path = _project_llm_config_path(env)
+        if config_path is None:
+            env_file = _find_env_file()
+            env_label = env_file if env_file else (Path.cwd() / ".env")
+            print(f"  Set PRUNE_CODEBASE_ROOT in {env_label} first.")
+            return False
         if config_path.exists():
             text = config_path.read_text(encoding="utf-8")
             if "// provider:" not in text:
-                text = f"// provider: {provider}   ← your preferred provider (anthropic | openai | gemini | groq)\n" + text
+                text = f"// provider: {provider}   â† your preferred provider (anthropic | openai | gemini | groq)\n" + text
                 config_path.write_text(text, encoding="utf-8")
         print(f"  Provider set to: {provider}")
 
@@ -612,7 +792,11 @@ def _check_provider_or_ask(env: dict) -> bool:
     else:
         print(f"FAILED")
         print(f"  [prune] {msg}")
-        print(f"  Fix: install the {provider} CLI or add the API key to ~/.prunetool/.env")
+        env_file = _find_env_file()
+        env_label = env_file if env_file else (Path.cwd() / ".env")
+        print(f"  Fix: install the {provider} CLI or add the API key to {env_label}")
+        if not sys.stdin.isatty():
+            return False
         choice = input("  Continue anyway? (y/n): ").strip().lower()
         return choice == "y"
 
@@ -630,16 +814,17 @@ def _default_config() -> dict:
     }
 
 
-# ── Daily stats ───────────────────────────────────────────────────────
+# â”€â”€ Daily stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class DailyStats:
     def __init__(self):
         self._data: dict = self._load()
 
     def _load(self) -> dict:
         today = str(datetime.date.today())
-        if STATS_FILE.exists():
+        stats_file = _runtime_file("daily_stats.json")
+        if stats_file.exists():
             try:
-                data = json.loads(STATS_FILE.read_text(encoding="utf-8"))
+                data = json.loads(stats_file.read_text(encoding="utf-8"))
                 if data.get("date") == today:
                     return data
             except Exception:
@@ -647,8 +832,9 @@ class DailyStats:
         return {"date": today, "usage": {}}
 
     def _save(self):
-        PRUNETOOL_DIR.mkdir(parents=True, exist_ok=True)
-        STATS_FILE.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        runtime_dir = _runtime_prunetool_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        _runtime_file("daily_stats.json").write_text(json.dumps(self._data, indent=2), encoding="utf-8")
 
     def tokens_used(self, model_id: str) -> int:
         return self._data["usage"].get(model_id, {}).get("total", 0)
@@ -669,7 +855,7 @@ class DailyStats:
         return self.tokens_used(model_id) / daily_goal * 100
 
 
-# ── Broker ────────────────────────────────────────────────────────────
+# â”€â”€ Broker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class Broker:
     WARN_PCT  = 90.0
     BLOCK_PCT = 95.0
@@ -689,7 +875,7 @@ class Broker:
         """
         Classify complexity from Scout structure (file/folder spread).
         Falls back to keyword heuristic if Scout returned nothing.
-        Groq LLM classifier removed — structural analysis is more accurate.
+        Groq LLM classifier removed â€” structural analysis is more accurate.
         """
         if file_count > 0 or active_folders:
             return _classify_by_structure(file_count, active_folders or [])
@@ -759,26 +945,26 @@ class Broker:
             if pct >= self.BLOCK_PCT:
                 warnings.append(
                     f"[prune] {model['label']} at {pct:.0f}% daily goal "
-                    f"({used:,}/{goal:,} tokens) — skipping."
+                    f"({used:,}/{goal:,} tokens) â€” skipping."
                 )
                 continue
 
             if context_tokens > max_ctx:
                 warnings.append(
                     f"[prune] {model['label']} maxContext {max_ctx:,} < "
-                    f"context {context_tokens:,} tokens — skipping."
+                    f"context {context_tokens:,} tokens â€” skipping."
                 )
                 continue
 
             if pct >= self.WARN_PCT:
                 warnings.append(
                     f"[prune] Warning: {model['label']} at {pct:.0f}% daily goal. "
-                    f"Continuing — will pivot when it hits 95%."
+                    f"Continuing â€” will pivot when it hits 95%."
                 )
 
             return model, warnings
 
-        # Nothing matched — try any available model with enough context
+        # Nothing matched â€” try any available model with enough context
         warnings.append(
             f"[prune] No {complexity} model available. Falling back to any model with headroom."
         )
@@ -793,7 +979,7 @@ class Broker:
         return None, warnings + ["[prune] ERROR: All models exhausted or over daily limit."]
 
 
-# ── Gateway helpers ────────────────────────────────────────────────────
+# â”€â”€ Gateway helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _gateway_up() -> bool:
     try:
         httpx.get(f"{GATEWAY_URL}/health", timeout=GATEWAY_TIMEOUT)
@@ -802,9 +988,97 @@ def _gateway_up() -> bool:
         return False
 
 
+def _port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _listener_pids(port: int) -> list[int]:
+    try:
+        out = subprocess.check_output(["netstat", "-ano"], text=True, errors="replace")
+    except Exception:
+        return []
+    pids: list[int] = []
+    needle = f":{port}"
+    for line in out.splitlines():
+        if needle not in line or "LISTENING" not in line:
+            continue
+        parts = line.split()
+        if parts and parts[-1].isdigit():
+            pid = int(parts[-1])
+            if pid not in pids:
+                pids.append(pid)
+    return pids
+
+
+def _process_name(pid: int) -> str:
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            text=True,
+            errors="replace",
+        ).strip()
+        if out and "No tasks are running" not in out:
+            return out.split(",", 1)[0].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+
+def _safe_to_stop_process(name: str) -> bool:
+    return name.lower() in {"prunetool.exe", "prune.exe", "python.exe", "pythonw.exe"}
+
+
+def _what_owns_port(port: int) -> str:
+    """Best-effort hint for what commonly occupies a port."""
+    known = {
+        8000: "a local gateway/dev server (FastAPI/Django/Rails default)",
+        8080: "a local proxy or web server (common default)",
+        3000: "a Node/React dev server",
+        5000: "a Flask dev server",
+    }
+    return known.get(port, "another process")
+
+
+def _ensure_ports_ready_for_gateway() -> bool:
+    gateway_port = int(os.environ.get("GATEWAY_PORT", 8000))
+    proxy_port = int(os.environ.get("PRUNE_PROXY_PORT", 8080))
+
+    for port, role in ((gateway_port, "Gateway"), (proxy_port, "Proxy")):
+        if _port_free(port):
+            continue
+
+        pids = _listener_pids(port)
+        names = [(pid, _process_name(pid)) for pid in pids]
+        stoppable = [pid for pid, name in names if _safe_to_stop_process(name)]
+
+        if stoppable:
+            for pid in stoppable:
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid), "/T"], capture_output=True, text=True)
+                except Exception:
+                    pass
+            time.sleep(1.0)
+            if _port_free(port):
+                continue
+
+        print(f"\n[prune] ERROR: Port {port} is already in use.")
+        print(f"  Likely cause: {_what_owns_port(port)}")
+        if names:
+            proc_list = ", ".join(f"{name or 'unknown'} (PID {pid})" for pid, name in names)
+            print(f"  Blocking process(es): {proc_list}")
+        else:
+            print("  Blocking process(es): unknown")
+        print(f"  PruneTool needs port {port} for the {role}.")
+        print("  Stop the process using that port, then run `prune.exe chat` again.\n")
+        return False
+
+    return True
+
+
 def _project_index_ready() -> bool:
     """
-    Check if .prunetool/last_scan.json exists — written at end of every
+    Check if .prunetool/last_scan.json exists â€” written at end of every
     successful scan. If it's there, all other index files are guaranteed to exist.
     """
     croot = Path(os.environ.get("PRUNE_CODEBASE_ROOT", Path.cwd()))
@@ -852,7 +1126,7 @@ def _wait_for_scan(timeout: float = 180.0):
                 pct = int(ann / total * 100) if total else 0
                 msg = f"  Annotating files... {ann}/{total} ({pct}%)"
             elif stage == "complete":
-                print(f"  Scan complete — {files} files, {syms} symbols indexed.\n")
+                print(f"  Scan complete â€” {files} files, {syms} symbols indexed.\n")
                 return
             else:
                 msg = f"  {stage}..."
@@ -862,7 +1136,7 @@ def _wait_for_scan(timeout: float = 180.0):
                 last_msg = msg
         except Exception:
             pass
-    print("  Scan timed out — context may be partial.\n")
+    print("  Scan timed out â€” context may be partial.\n")
 
 
 def _load_project_context() -> str:
@@ -897,12 +1171,12 @@ def _get_pruned_context(prompt: str) -> tuple[str, int, int, list[str]]:
 
 def _classify_by_structure(file_count: int, active_folders: list[str]) -> str:
     """
-    Classify query complexity from Scout results — no LLM call needed.
+    Classify query complexity from Scout results â€” no LLM call needed.
     Counts how many distinct folders Scout selected for this query.
 
-    1 folder, 1-2 files  → simple
-    2-3 folders           → medium
-    4+ folders            → heavy
+    1 folder, 1-2 files  â†’ simple
+    2-3 folders           â†’ medium
+    4+ folders            â†’ heavy
     """
     folder_count = len(active_folders)
     if folder_count >= 4 or file_count >= 6:
@@ -912,9 +1186,9 @@ def _classify_by_structure(file_count: int, active_folders: list[str]) -> str:
     return "simple"
 
 
-# ── CLI backend (for subscription users without API keys) ─────────────
+# â”€â”€ CLI backend (for subscription users without API keys) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-# Maps provider → (cli_command, prompt_flag, model_flag)
+# Maps provider â†’ (cli_command, prompt_flag, model_flag)
 _PROVIDER_CLI: dict[str, tuple[str, str, str]] = {
     "anthropic": ("claude",  "-p", "--model"),
     "gemini":    ("gemini",  "-p", "--model"),
@@ -935,17 +1209,17 @@ def _detect_backends(env: dict, config: dict) -> dict[str, str]:
     Used by model picker to show/hide models and label their access method.
     """
     result = {}
+    provider_cache: dict[str, str] = {}
     for m in config.get("models", []):
         provider = m["provider"]
-        if _find_cli(provider):
-            result[m["id"]] = "cli"       # CLI beats API key — subscription user
-        elif _get_key(provider, env):
-            result[m["id"]] = "api"
-        else:
-            result[m["id"]] = "none"
+        if provider not in provider_cache:
+            ok, _ = _ping_provider(provider, env)
+            if ok:
+                provider_cache[provider] = "cli" if _find_cli(provider) else "api"
+            else:
+                provider_cache[provider] = "none"
+        result[m["id"]] = provider_cache[provider]
     return result
-
-
 def _call_cli(model: dict, messages: list, stats: DailyStats) -> tuple[int, int]:
     """
     Call provider CLI (claude / gemini) with -p flag.
@@ -1003,7 +1277,7 @@ def _call_cli(model: dict, messages: list, stats: DailyStats) -> tuple[int, int]
     return tokens_in, tokens_out
 
 
-# ── LLM call (streaming) ──────────────────────────────────────────────
+# â”€â”€ LLM call (streaming) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 PROVIDER_ENDPOINTS = {
     "anthropic": "https://api.anthropic.com/v1/messages",
     "openai":    "https://api.openai.com/v1/chat/completions",
@@ -1020,14 +1294,14 @@ def _stream_response(model: dict, messages: list, env: dict, stats: DailyStats):
     api_key   = _get_key(provider, env)
     endpoint  = PROVIDER_ENDPOINTS.get(provider)
 
-    # Check CLI first — subscription users don't have API keys
+    # Check CLI first â€” subscription users don't have API keys
     if _find_cli(provider):
         return _call_cli(model, messages, stats)
 
     if not api_key:
         print(f"[prune] ERROR: No {provider} CLI found and no API key set.")
         print(f"         Option 1: Install the {provider} CLI and log in.")
-        print(f"         Option 2: Add {provider.upper()}_API_KEY to ~/.prunetool/.env")
+        print(f"         Option 2: Add {provider.upper()}_API_KEY to {Path.cwd() / '.env'}")
         return 0, 0
 
     if not endpoint:
@@ -1098,38 +1372,92 @@ def _stream_response(model: dict, messages: list, env: dict, stats: DailyStats):
     return tokens_in, tokens_out
 
 
-# ── Active model persistence ──────────────────────────────────────────
+# â”€â”€ Active model persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _get_active_model_alias() -> str:
-    if ACTIVE_MODEL_FILE.exists():
-        return ACTIVE_MODEL_FILE.read_text(encoding="utf-8").strip()
+    active_file = _runtime_file("active_model.txt")
+    if active_file.exists():
+        return active_file.read_text(encoding="utf-8").strip()
     return "auto"
 
 
 def _set_active_model_alias(alias: str):
-    PRUNETOOL_DIR.mkdir(parents=True, exist_ok=True)
-    ACTIVE_MODEL_FILE.write_text(alias, encoding="utf-8")
+    runtime_dir = _runtime_prunetool_dir()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    _runtime_file("active_model.txt").write_text(alias, encoding="utf-8")
+
+
+def _get_previous_model_alias() -> str:
+    prev_file = _runtime_file("previous_model.txt")
+    if prev_file.exists():
+        return prev_file.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _set_previous_model_alias(alias: str):
+    runtime_dir = _runtime_prunetool_dir()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    _runtime_file("previous_model.txt").write_text(alias, encoding="utf-8")
+
+
+def _normalize_model_key(value: str) -> str:
+    value = value.lower().strip()
+    value = _re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-")
 
 
 def _resolve_alias(alias: str, config: dict, env: dict) -> Optional[dict]:
-    """Map alias like 'sonnet', 'groq', 'haiku' to a model dict."""
+    """Resolve a model by id, label, model name, or a unique fuzzy token."""
+    target = _normalize_model_key(alias)
+    target_tokens = [tok for tok in target.split("-") if tok]
+    models = config.get("models", [])
+
+    exact_matches = []
+    scored_matches = []
+    for idx, model in enumerate(models):
+        fields = [
+            model.get("id", ""),
+            model.get("model", ""),
+            model.get("label", ""),
+            model.get("provider", ""),
+        ]
+        normalized = [_normalize_model_key(str(field)) for field in fields if field]
+        if target in normalized:
+            exact_matches.append((idx, model))
+            continue
+        key_tokens = set()
+        for key in normalized:
+            key_tokens.update(tok for tok in key.split("-") if tok)
+        overlap = len(set(target_tokens) & key_tokens)
+        prefix_bonus = 1 if any(key.startswith(target) or target.startswith(key) for key in normalized) else 0
+        contains_bonus = 1 if any(target in key for key in normalized) else 0
+        score = overlap * 10 + prefix_bonus * 3 + contains_bonus * 2
+        if score:
+            scored_matches.append((score, -idx, model))
+
+    if exact_matches:
+        return exact_matches[0][1]
+    if scored_matches:
+        scored_matches.sort(reverse=True)
+        return scored_matches[0][2]
+
+    # Legacy shortcuts for older muscle-memory commands.
     alias_map = {
         "sonnet":  "claude-sonnet-4-6",
-        "opus":    "claude-opus-4-7",
+        "opus":    "claude-opus-4-6",
         "haiku":   "claude-haiku-4-5-20251001",
         "gpt-4o":  "gpt-4o",
         "codex":   "gpt-4.1",
         "groq":    "llama-3.3-70b-versatile",
         "gemini":  "gemini-2.0-flash",
     }
-    model_id = alias_map.get(alias.lower(), alias)
-    for m in config.get("models", []):
-        if m["id"] == model_id:
+    model_id = alias_map.get(target, alias)
+    for m in models:
+        if m["id"] == model_id or m.get("model") == model_id:
             return m
-    # Build a minimal entry for unknown model IDs so we can still call them
     return None
 
 
-# ── Model picker (Copilot-style) ──────────────────────────────────────
+# â”€â”€ Model picker (Copilot-style) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _model_picker(config: dict, env: dict, stats: DailyStats) -> str:
     """
     Show a numbered model list and let the user pick one.
@@ -1140,7 +1468,7 @@ def _model_picker(config: dict, env: dict, stats: DailyStats) -> str:
 
     if not available:
         print("  [prune] No models available.")
-        print("          Install a provider CLI (claude / gemini) or add API keys to ~/.prunetool/.env")
+        print(f"          Install a provider CLI (claude / gemini) or add API keys to {Path.cwd() / '.env'}")
         return "auto"
 
     print("\n  Select a model (or press Enter for auto-routing):\n")
@@ -1183,7 +1511,7 @@ def _model_picker(config: dict, env: dict, stats: DailyStats) -> str:
         print(f"  Please enter a number between 1 and {len(available)+1}, or press Enter.")
 
 
-# ── Commands ──────────────────────────────────────────────────────────
+# â”€â”€ Commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def cmd_models(config: dict, env: dict, stats: DailyStats):
     print("\nConfigured models:\n")
     print(f"  {'Label':<22} {'Provider':<12} {'Complexity':<22} {'Used today':>12}  {'Goal':>10}  {'%':>6}  Context")
@@ -1203,25 +1531,46 @@ def cmd_models(config: dict, env: dict, stats: DailyStats):
 
 
 def cmd_model(alias: str, config: dict, env: dict):
+    current = _get_active_model_alias()
     if alias == "auto":
+        if current and current != "auto":
+            _set_previous_model_alias(current)
         _set_active_model_alias("auto")
         print(f"[prune] Auto-routing enabled. Groq will classify each prompt.")
         return
+    if alias in ("auto exit", "auto-exit", "exit auto"):
+        previous = _get_previous_model_alias()
+        if previous:
+            restored = _resolve_alias(previous, config, env)
+            if restored:
+                _set_active_model_alias(restored["id"])
+                print(f"[prune] Auto-routing disabled. Restored {restored['label']} ({restored['id']}) via {restored['provider']}")
+                return
+        available = [m for m in config.get("models", []) if _get_key(m["provider"], env)]
+        fallback = available[0] if available else (config.get("models", []) or [None])[0]
+        if fallback:
+            _set_active_model_alias(fallback["id"])
+            print(f"[prune] Auto-routing disabled. Restored {fallback['label']} ({fallback['id']}) via {fallback['provider']}")
+            return
+        print("[prune] Auto-routing disabled, but no model is available to restore.")
+        sys.exit(1)
     model = _resolve_alias(alias, config, env)
     if not model:
         print(f"[prune] Unknown model '{alias}'. Run 'prune models' to see options.")
         sys.exit(1)
     if not _get_key(model["provider"], env):
-        print(f"[prune] No API key for {model['provider']}. Add {model['provider'].upper()}_API_KEY to ~/.prunetool/.env")
+        env_file = _find_env_file()
+        env_label = env_file if env_file else (Path.cwd() / ".env")
+        print(f"[prune] No API key for {model['provider']}. Add {model['provider'].upper()}_API_KEY to {env_label}")
         sys.exit(1)
-    _set_active_model_alias(alias)
-    print(f"[prune] Locked to {model['label']} ({model['id']})")
+    _set_active_model_alias(model["id"])
+    print(f"[prune] Locked to {model['label']} ({model['id']}) via {model['provider']}")
 
 
 def cmd_status(config: dict, env: dict):
     active = _get_active_model_alias()
     gw_up  = _gateway_up()
-    print(f"\n  Gateway   : {'UP  (context injection active)' if gw_up else 'DOWN (plain LLM mode — run prunetool.exe first)'}")
+    print(f"\n  Gateway   : {'UP  (context injection active)' if gw_up else 'DOWN (plain LLM mode â€” run prunetool.exe first)'}")
     print(f"  Model     : {active}")
     configured = [m["provider"] for m in config.get("models", []) if _get_key(m["provider"], env)]
     print(f"  Keys      : {', '.join(set(configured)) or 'none'}")
@@ -1251,16 +1600,16 @@ def _scan_age_seconds() -> Optional[float]:
 
 def _cmd_describe(gw_up: bool) -> str:
     """
-    /describe handler — checks scan freshness, optionally rescans,
+    /describe handler â€” checks scan freshness, optionally rescans,
     then loads terminal_context.md into session cache.
     Returns the project_context string (empty string on failure).
     """
     if not gw_up:
-        print("[prune] Gateway is not running — cannot load project context.")
+        print("[prune] Gateway is not running â€” cannot load project context.")
         print("        Start prunetool.exe first, then type describe_project again.")
         return ""
 
-    # ── No index at all → auto scan ───────────────────────────────────
+    # â”€â”€ No index at all â†’ auto scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not _project_index_ready():
         croot = os.environ.get("PRUNE_CODEBASE_ROOT", str(Path.cwd()))
         print(f"[prune] No project index found for: {croot}")
@@ -1268,10 +1617,10 @@ def _cmd_describe(gw_up: bool) -> str:
         if _trigger_project_scan():
             _wait_for_scan()
         else:
-            print("[prune] Could not trigger scan — open http://localhost:8000 and click Scan Project.")
+            print("[prune] Could not trigger scan â€” open http://localhost:8000 and click Scan Project.")
             return ""
 
-    # ── Index exists — check age ──────────────────────────────────────
+    # Check last_scan.json first, and rescan only if the scan is stale.
     age = _scan_age_seconds()
     info = _last_scan_info()
     file_count = info.get("file_count", "?")
@@ -1282,6 +1631,7 @@ def _cmd_describe(gw_up: bool) -> str:
         mins  = int((age % 3600) // 60)
         age_str = f"{hours}h {mins}m ago" if hours else f"{mins}m ago"
         print(f"[prune] Last scan was {age_str}  ({file_count} files, {sym_count:,} symbols)")
+        print("[prune] Scan is older than 1 hour, so PruneTool will rescan before loading context.")
         try:
             answer = input("[prune] Rescan project before loading context? (y/n): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1291,20 +1641,20 @@ def _cmd_describe(gw_up: bool) -> str:
             if _trigger_project_scan():
                 _wait_for_scan()
             else:
-                print("[prune] Scan failed — loading existing context.")
+                print("[prune] Scan failed â€” loading existing context.")
     else:
         if age is not None:
             mins = int(age // 60)
-            print(f"[prune] Project index is fresh ({mins}m old) — {file_count} files, {sym_count:,} symbols")
+            print(f"[prune] Project index is fresh ({mins}m old) â€” {file_count} files, {sym_count:,} symbols")
 
-    # ── Load context ──────────────────────────────────────────────────
+    # â”€â”€ Load context â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     print("[prune] Loading project context... ", end="", flush=True)
     ctx = _load_project_context()
     if ctx:
         tok_est = len(ctx) // 4
-        print(f"done (~{tok_est:,} tokens)  — project context is now active for this session.\n")
+        print(f"done (~{tok_est:,} tokens)  â€” project context is now active for this session.\n")
     else:
-        print("failed — terminal_context.md not found. Try rescanning.")
+        print("failed â€” terminal_context.md not found. Try rescanning.")
     return ctx
 
 
@@ -1321,13 +1671,17 @@ def _launch_gateway_window():
     gateway_exe = next((p for p in candidates if p.exists()), None)
 
     if not gateway_exe:
-        print("[prune] Could not find prunetool.exe — start it manually.")
+        print("[prune] Could not find prunetool.exe â€” start it manually.")
         return
 
-    # /k keeps the window open so user can read logs after gateway stops
+    # Use `start` so Windows opens the gateway in its own terminal window.
+    # Pass --gateway to run ONLY the gateway server (not both gateway + proxy).
+    # The /WAIT flag keeps the terminal window open until the gateway exits.
+    # Environment variables are passed to ensure project config is available.
     subprocess.Popen(
-        f'start "PruneTool Gateway" /k "{gateway_exe}"',
+        f'start "PruneTool Gateway" /WAIT cmd /c "{gateway_exe} --gateway"',
         shell=True,
+        env=os.environ.copy(),
     )
 
 
@@ -1338,9 +1692,11 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
     print("\n  PruneTool Chat")
     print("  " + "=" * 40)
 
-    # ── Step 1: ensure gateway is running ─────────────────────────────
+    # â”€â”€ Step 1: ensure gateway is running â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not gw_up:
-        print("  [prune] Gateway not running — starting it now...\n")
+        if not _ensure_ports_ready_for_gateway():
+            return
+        print("  [prune] Gateway not running â€” starting it now...\n")
         _launch_gateway_window()
         for i in range(20):
             time.sleep(1)
@@ -1350,9 +1706,9 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
                 break
             print(f"  [prune] Waiting for gateway{'.' * ((i % 3) + 1)}   ", end="\r")
         if not gw_up:
-            print("\n  [prune] Gateway did not start — continuing without codebase context.\n")
+            print("\n  [prune] Gateway did not start â€” continuing without codebase context.\n")
 
-    # ── Step 2: ensure a project index exists (first-time only) ──────
+    # â”€â”€ Step 2: ensure a project index exists (first-time only) â”€â”€â”€â”€â”€â”€
     if gw_up:
         if not _project_index_ready():
             croot = os.environ.get("PRUNE_CODEBASE_ROOT", str(Path.cwd()))
@@ -1361,10 +1717,11 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
             if _trigger_project_scan():
                 _wait_for_scan()
             else:
-                print("  [prune] Could not trigger scan — open http://localhost:8000 and click Scan Project.\n")
+                print("  [prune] Could not trigger scan â€” open http://localhost:8000 and click Scan Project.\n")
 
-    # ── Step 3: verify provider is reachable ─────────────────────────
-    _check_provider_or_ask(env)
+    # â”€â”€ Step 3: verify provider is reachable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if not _check_provider_or_ask(env):
+        return
 
     # Copilot-style model picker on every session start
     chosen_alias = _model_picker(config, env, stats)
@@ -1372,9 +1729,9 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
     active_alias = chosen_alias
 
     if active_alias == "auto":
-        print("  Type describe_project to load project context, /model <name> to switch, /quit to exit\n")
+        print("  Type describe_project, /model <name>, /model auto exit, /models, /status, /clear, /quit or /exit\n")
     else:
-        print("  Type describe_project to load project context, /model auto for auto-routing, /quit to exit\n")
+        print("  Type describe_project, /model auto, /model auto exit, /models, /status, /clear, /quit or /exit\n")
 
     history: list[dict] = []
 
@@ -1411,17 +1768,17 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
         if prompt == "describe_project":
             ctx = _cmd_describe(gw_up)
             if ctx:
-                # Inject into history ONCE — LLM remembers for whole session
+                # Inject into history ONCE â€” LLM remembers for whole session
                 history.append({"role": "user",      "content": f"## Project Context\n{ctx}"})
-                history.append({"role": "assistant", "content": "Got it. I now have full context of your project — folder structure, symbols, and annotations loaded. Ask me anything about your codebase."})
+                history.append({"role": "assistant", "content": "Got it. I now have full context of your project â€” folder structure, symbols, and annotations loaded. Ask me anything about your codebase."})
             continue
 
-        # ── Get pruned context ────────────────────────────────────────
+        # â”€â”€ Get pruned context â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         ctx_text, ctx_tokens, file_count, active_folders = ("", 0, 0, [])
         if gw_up:
             ctx_text, ctx_tokens, file_count, active_folders = _get_pruned_context(prompt)
 
-        # ── Pick model ────────────────────────────────────────────────
+        # â”€â”€ Pick model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if active_alias == "auto":
             complexity = broker.classify_complexity(prompt, ctx_tokens, file_count, active_folders)
             chosen, warnings = broker.pick(complexity, ctx_tokens)
@@ -1442,22 +1799,22 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
             if ctx_tokens > max_ctx:
                 print(f"[prune] Warning: context ({ctx_tokens:,} tokens) exceeds {chosen['label']} limit ({max_ctx:,}). Response may be truncated.")
 
-        # ── Build messages ────────────────────────────────────────────
+        # â”€â”€ Build messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         system_parts = [
             "You are a coding assistant with deep knowledge of the user's codebase.",
             "Answer concisely and directly. Refer to specific files and line numbers when relevant.",
         ]
-        # Per-prompt pruned snippets — only relevant code for this question
+        # Per-prompt pruned snippets â€” only relevant code for this question
         if ctx_text:
             system_parts.append(
                 f"\n## Relevant Code for This Question (pruned by Scout)\n{ctx_text}"
             )
 
         messages = [{"role": "system", "content": "\n".join(system_parts)}]
-        messages += history  # project_context lives here after /describe — sent once
+        messages += history  # project_context lives here after /describe â€” sent once
         messages.append({"role": "user", "content": prompt})
 
-        # ── Stream response ───────────────────────────────────────────
+        # â”€â”€ Stream response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"\n{chosen['label']}> ", end="", flush=True)
         tok_in, tok_out = _stream_response(chosen, messages, env, stats)
 
@@ -1471,7 +1828,7 @@ def cmd_chat(config: dict, env: dict, stats: DailyStats):
             print(f"  [{chosen['label']} | +{tok_in+tok_out:,} tokens today]\n")
 
 
-# ── Entry point ───────────────────────────────────────────────────────
+# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def main():
     args = sys.argv[1:]
 
@@ -1487,10 +1844,11 @@ PruneTool CLI
 Inside chat:
   describe_project        Load project context into this session
   /model <alias>          Switch model mid-session
+  /model auto exit        Exit auto-routing and restore the previous model
   /models                 Show model list
   /status                 Show status
   /clear                  Clear conversation history
-  /quit                   Exit
+  /quit / /exit / /q      Exit and shut down the session
 """)
         return
 
@@ -1522,3 +1880,4 @@ Inside chat:
 
 if __name__ == "__main__":
     main()
+

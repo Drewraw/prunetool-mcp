@@ -25,12 +25,16 @@ prunetool-app/
   _internal/       ← bundled runtime (Python, libs, grammars)
 ```
 
-### 2. Tell PruneTool which project to index
+### 2. Copy the unzipped PruneTool package into your target project and create a `.env` file
 
-Create `~/.prunetool/.env` (i.e. `C:\Users\yourname\.prunetool\.env`):
+PruneTool searches for `.env` inside the project tree, so this works too:
+
+- `C:\Newexpw\new\experiment\functions\.env`
+
+The `.env` file must include your project root:
 
 ```env
-PRUNE_CODEBASE_ROOT=C:\path\to\your\project
+PRUNE_CODEBASE_ROOT=C:\Users\kunda\Intellij Workspace\Projects\SpringBootRestApplication
 ```
 
 Optional API keys (only needed if you don't have a Claude/Gemini CLI installed):
@@ -43,19 +47,22 @@ GROQ_API_KEY=gsk_...
 
 ### 3. Start chatting
 
-```
-prune.exe chat
+``` eg:
+PS C:\Users\kunda\Intellij Workspace\Projects\SpringBootRestApplication> .\prune.exe chat
 ```
 
-PruneTool will:
+PruneTool should do:
 - Open the gateway server in a new terminal window automatically
 - Wait for the gateway to be ready (up to 20s)
 - Show a model picker — choose your AI or press Enter for auto-routing
+- Create `.prunetool\llms_prunetoolfinder.js` if it does not exist
+- Read the provider list from the first line of that file
 
 Then inside chat, type `describe_project` to load your project context:
 
 ```
 you> describe_project
+ create .prunetool folder and inside creates necessary .js files 
 [prune] Project index found — 449 files, 10,523 symbols (scanned 2026-04-29)
 [prune] Loading project context... done (~5,200 tokens)
 — project context is now active for this session.
@@ -155,27 +162,19 @@ Answer streamed back to your terminal
 
 ## Model Configuration
 
-On first run, PruneTool auto-generates `~/.prunetool/llms_prunetoolfinder.js` for you:
+PruneTool reads the provider list from the first line of `llms_prunetoolfinder.js`:
 
-- Detects which CLIs are installed (`claude`, `gemini`) and which API keys are in `~/.prunetool/.env`
-- Shows detected providers and asks which ones you want to use
-- You can pick **one or multiple** providers (e.g. `1` or `1,2` or `anthropic,groq`)
-- Fills in curated model IDs, complexity tiers, and 50K daily token limit per model
-
-Example — picking both Anthropic and Groq:
-
+```js
+// provider: anthropic,groq
 ```
-Detected providers:
-  1. anthropic  (via CLI)
-  2. groq       (via API key)
 
-Pick providers (e.g. '1' or '1,2' or 'anthropic,groq'): 1,2
-```
+If that line is missing, PruneTool tells you to add it and rerun `prune chat`.
 
 Generated `llms_prunetoolfinder.js`:
 
 ```js
-// provider: anthropic, groq
+// provider: anthropic,groq
+// Edit this first line to choose providers.
 //
 // Access methods:
 //   anthropic:
@@ -186,6 +185,10 @@ Generated `llms_prunetoolfinder.js`:
 //     API → GROQ_API_KEY ✓ detected
 //
 // PruneTool uses CLI first, API key as fallback.
+// Complexity legend:
+//   simple = typo fix, rename, add one line, small bug, one-file tweak
+//   medium = new function, small feature, explain one file
+//   heavy  = architecture, refactor multiple files, explain the whole system
 module.exports = {
   models: [
     { id: "claude-haiku-4-5-20251001", label: "Claude Haiku",      model: "claude-haiku-4-5-20251001", complexity: "simple",  dailyTokenGoal: 50000 },
@@ -197,10 +200,13 @@ module.exports = {
 };
 ```
 
-- `complexity` — auto-guessed from model name (8B→simple, 70B→medium, opus/large→complex)
+- `complexity` — auto-guessed from model name:
+  - `simple` = small one-file changes
+  - `medium` = focused feature work or one-file explanation
+  - `heavy` = architecture, refactor, or cross-file reasoning
 - `dailyTokenGoal` — PruneTool warns at 90%, switches model at 95% (default: 50,000)
 - Context window fetched live from provider APIs at startup, cached 24 hours
-- On every startup, PruneTool pings your configured provider before showing the model picker
+- On every startup, PruneTool pings the providers listed in the first line before showing the model picker
 
 ---
 
@@ -208,21 +214,18 @@ module.exports = {
 
 ```
 prune.exe chat              Start chat (gateway auto-opens, model picker appears)
-prune.exe models            List all models and today's usage
-prune.exe status            Show gateway status and active model
-prune.exe model sonnet      Lock to a specific model for this session
-prune.exe model auto        Switch back to auto-routing
-```
 
-Inside chat:
+```
+work start Inside prune.exe chat:
 ```
 describe_project    Load project context into this session
-/model <alias>      Switch model mid-session
-/model auto         Switch back to auto-routing
-/models             Show model list and usage
-/status             Show gateway status
-/clear              Clear conversation history
-/quit               Exit
+/model <llm model>      choose and Switch model in session. llm model wont change until end of session.
+/model auto          Switch to auto-routing by llama instant from .env
+/model auto exit     stops auto mode of choosing llm by llama instant from .env
+/models              Show active provider models as per auth list and usage
+/status              Show gateway status
+/clear               Clear conversation history
+/quit                Exit
 ```
 
 ### How `describe_project` works
@@ -356,29 +359,8 @@ prunetool/
   ui/                       React + Vite dashboard
 ```
 
----
+--
 
-## Building from Source
-
-Requirements: Python 3.10+, Node.js 18+
-
-```bash
-# Backend
-pip install -r server/requirements.txt
-
-# Frontend
-cd ui && npm install && npm run build && cd ..
-
-# Run from source
-python start_mcp.py
-
-# Build binary
-pyinstaller prunetool.spec --clean -y
-# Output: dist/prunetool/prunetool.exe + prune.exe
-```
-
----
-
-## License
+#### License
 
 Proprietary. All rights reserved.

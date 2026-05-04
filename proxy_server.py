@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 import uvicorn
 
 # ── Config ────────────────────────────────────────────────────────────
@@ -368,8 +369,6 @@ async def _startup():
 # ── /prefetch — called by IDE extensions or gateway to warm cache ─────
 class PrefetchRequest(BaseModel):
     query: str
-
-from pydantic import BaseModel
 
 @app.post("/prefetch")
 async def prefetch_endpoint(req: PrefetchRequest):

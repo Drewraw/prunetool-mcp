@@ -42,8 +42,18 @@ lib_datas = [
     (str(ROOT / "prune library"), "prune library"),
 ]
 
+# ── Server files (gateway + proxy) ────────────────────────────────────
+# These must be included as data files so prunetool.exe can run them
+# via subprocess from _internal/server/gateway.py and _internal/proxy_server.py
+server_datas = [
+    (str(ROOT / "server"), "server"),
+    (str(ROOT / "proxy_server.py"), "."),
+    (str(ROOT / "mcp_server.py"), "."),
+    (str(ROOT / "mcp_stdio.py"), "."),
+]
+
 # ── All datas combined ────────────────────────────────────────────────
-all_datas = grammar_datas + ui_datas + lib_datas
+all_datas = grammar_datas + ui_datas + lib_datas + server_datas
 
 # ── Hidden imports ────────────────────────────────────────────────────
 # Modules loaded dynamically that PyInstaller can't auto-detect.
