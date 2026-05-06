@@ -18,7 +18,7 @@ body{font-family:'Instrument Sans',sans-serif;background:var(--bg);color:var(--w
 
 /* NAV */
 nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:18px 40px;border-bottom:1px solid var(--border);background:rgba(12,12,14,0.88);backdrop-filter:blur(20px)}
-.logo{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:800;letter-spacing:-0.02em;color:var(--white);text-decoration:none;display:flex;align-items:center;gap:8px}
+.logo{font-family:'Times New Roman',serif;font-size:1.1rem;font-weight:800;letter-spacing:-0.02em;color:var(--white);text-decoration:none;display:flex;align-items:center;gap:8px}
 .logo-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:pulse 2s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
 .nav-right{display:flex;align-items:center;gap:24px}
@@ -31,7 +31,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
 .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:120px 24px 60px;position:relative;text-align:center}
 .hero-glow{position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:700px;height:700px;background:radial-gradient(ellipse,rgba(232,255,71,.07) 0%,transparent 70%);pointer-events:none}
 .hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.2);padding:6px 14px;border-radius:100px;font-size:.75rem;font-weight:500;letter-spacing:.06em;color:var(--accent);text-transform:uppercase;margin-bottom:32px;opacity:0;animation:slideIn .5s .1s ease forwards}
-.hero h1{font-family:'Syne',sans-serif;font-size:clamp(1.1rem,2.2vw,2rem);font-weight:800;line-height:.95;letter-spacing:-.04em;max-width:900px;opacity:0;animation:slideIn .6s .2s ease forwards}
+.hero h1{font-family:'Times New Roman',serif;font-size:clamp(1.1rem,2.2vw,2rem);font-weight:800;line-height:.95;letter-spacing:-.04em;max-width:900px;opacity:0;animation:slideIn .6s .2s ease forwards}
 .hero h1 .line2{color:var(--muted2)}
 .hero h1 .aw{color:var(--accent)}
 .hero-sub{max-width:480px;margin:28px auto 0;font-size:1.05rem;font-weight:300;color:var(--muted2);line-height:1.7;opacity:0;animation:slideIn .6s .35s ease forwards}
@@ -122,7 +122,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
 .features{padding:100px 24px;max-width:1100px;margin:0 auto}
 .feat-header{text-align:center;margin-bottom:64px}
 .section-eyebrow{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:16px}
-.section-h2{font-family:'Syne',sans-serif;font-size:clamp(1.5rem,2.5vw,2.4rem);font-weight:800;line-height:1.05;letter-spacing:-.03em}
+.section-h2{font-family:'Times New Roman',serif;font-size:clamp(1.5rem,2.5vw,2.4rem);font-weight:800;line-height:1.05;letter-spacing:-.03em}
 .section-h2 .dim{color:var(--muted2)}
 .section-p{max-width:500px;margin:16px auto 0;font-size:1rem;color:var(--muted2);line-height:1.7;font-weight:300}
 .feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
@@ -130,7 +130,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
 .feat-card:hover{border-color:var(--border2);transform:translateY(-3px)}
 .feat-card:first-child{grid-column:span 2}
 .feat-icon{width:44px;height:44px;border-radius:10px;background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.15);display:flex;align-items:center;justify-content:center;font-size:1.2rem;margin-bottom:20px}
-.feat-card h3{font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:700;margin-bottom:10px}
+.feat-card h3{font-family:'Times New Roman',serif;font-size:1.05rem;font-weight:700;margin-bottom:10px}
 .feat-card p{font-size:.875rem;color:var(--muted2);line-height:1.65}
 
 /* AGENTS */
@@ -148,27 +148,19 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
 .agent-status{font-size:.7rem;font-weight:500;padding:3px 10px;border-radius:100px}
 .agent-status.live{background:rgba(40,200,100,.1);color:#28c840;border:1px solid rgba(40,200,100,.25)}
 .agent-status.soon{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid var(--border)}
-.agents-right h3{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:800;margin-bottom:16px;letter-spacing:-.02em}
+.agents-right h3{font-family:'Times New Roman',serif;font-size:1.3rem;font-weight:800;margin-bottom:16px;letter-spacing:-.02em}
 .agents-right p{font-size:.95rem;color:var(--muted2);line-height:1.75;margin-bottom:24px}
 .flow-steps{display:flex;flex-direction:column;gap:20px}
 .flow-step{display:flex;gap:16px;align-items:flex-start}
-.flow-num{font-family:'Syne',sans-serif;font-size:.75rem;font-weight:700;color:var(--accent);background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.2);width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
+.flow-num{font-family:'Times New Roman',serif;font-size:.75rem;font-weight:700;color:var(--accent);background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.2);width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
 .flow-step p{font-size:.875rem;color:var(--muted2);line-height:1.6}
 .flow-step strong{color:var(--white)}
 
-/* PROOF */
-.proof-section{padding:80px 24px;max-width:1100px;margin:0 auto}
-.proof-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:48px}
-.proof-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px}
-.proof-text{font-size:.9rem;color:var(--muted2);line-height:1.7;margin-bottom:20px;font-style:italic}
-.proof-author{display:flex;align-items:center;gap:10px}
-.proof-avatar{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.85rem;font-weight:700;color:#0c0c0e}
-.proof-name{font-size:.83rem;font-weight:500}
-.proof-role{font-size:.75rem;color:var(--muted)}
+
 
 /* CTA FINAL */
 .cta-final{margin:0 24px 80px;background:linear-gradient(135deg,rgba(232,255,71,.08) 0%,rgba(79,143,255,.06) 100%);border:1px solid rgba(232,255,71,.15);border-radius:24px;padding:80px 40px;text-align:center}
-.cta-final h2{font-family:'Syne',sans-serif;font-size:clamp(1.5rem,2.5vw,2.4rem);font-weight:800;letter-spacing:-.03em;margin-bottom:16px}
+.cta-final h2{font-family:'Times New Roman',serif;font-size:clamp(1.5rem,2.5vw,2.4rem);font-weight:800;letter-spacing:-.03em;margin-bottom:16px}
 .cta-final p{color:var(--muted2);font-size:1rem;margin-bottom:36px;max-width:440px;margin-left:auto;margin-right:auto}
 .cta-email-row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;max-width:480px;margin:0 auto}
 .cta-email-input{flex:1;min-width:220px;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:10px;padding:13px 18px;color:var(--white);font-family:'Instrument Sans',sans-serif;font-size:.9rem;outline:none;transition:border-color .2s}
@@ -177,7 +169,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
 
 /* FOOTER */
 footer{padding:32px 40px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
-.footer-logo{font-family:'Syne',sans-serif;font-size:1rem;font-weight:800;color:var(--white);text-decoration:none}
+.footer-logo{font-family:'Times New Roman',serif;font-size:1rem;font-weight:800;color:var(--white);text-decoration:none}
 footer p{font-size:.8rem;color:var(--muted)}
 
 /* ANIMATIONS */
@@ -420,38 +412,7 @@ footer p{font-size:.8rem;color:var(--muted)}
   </div>
 </section>
 
-<!-- PROOF -->
-<section>
-  <div class="proof-section reveal">
-    <div style="text-align:center">
-      <p class="section-eyebrow">Early feedback</p>
-      <h2 class="section-h2">Teams that saw it <span class="dim">wanted it immediately.</span></h2>
-    </div>
-    <div class="proof-grid">
-      <div class="proof-card">
-        <p class="proof-text">"I asked it what was blocking our sprint and it pulled context from Jira, Slack, and two open PRs in about 4 seconds. I've never felt that kind of clarity before."</p>
-        <div class="proof-author">
-          <div class="proof-avatar" style="background:#e8ff47">A</div>
-          <div><div class="proof-name">Aditya R.</div><div class="proof-role">Engineering Lead, Series B startup</div></div>
-        </div>
-      </div>
-      <div class="proof-card">
-        <p class="proof-text">"The demo alone convinced us. Tools that are aware of each other — not via Zapier hacks but natively — that's what we've been waiting for."</p>
-        <div class="proof-author">
-          <div class="proof-avatar" style="background:#4f8fff">S</div>
-          <div><div class="proof-name">Sneha M.</div><div class="proof-role">CTO, SaaS platform</div></div>
-        </div>
-      </div>
-      <div class="proof-card">
-        <p class="proof-text">"Our PMs spend 40% of their time syncing context between Jira, Slack, and email. ProjectOS makes that problem disappear."</p>
-        <div class="proof-author">
-          <div class="proof-avatar" style="background:#ff6b35">R</div>
-          <div><div class="proof-name">Rahul K.</div><div class="proof-role">VP Product, Fintech</div></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
+
 
 <!-- CTA -->
 <section id="cta">
